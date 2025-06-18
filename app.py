@@ -1,102 +1,73 @@
-from flask import Flask , render_template,session,redirect,request,url_for
-from flask_socketio import  join_room,leave_room,send,SocketIO 
-import random 
+from flask import Flask, request
+from flask_socketio import SocketIO, join_room, leave_room, send
+import random
 from string import ascii_uppercase
 
-app= Flask(__name__)
-app.config["SECRET_KEY"]="ccyjv"#will preserve the app data
-socketio= SocketIO(app)#socketio establishment in app for bidirectional communication 
+app = Flask(__name__)
+app.config["SECRET_KEY"] = "ccyjv"
+socketio = SocketIO(app, cors_allowed_origins="*")  # Allow all origins for dev; configure in prod
 
-rooms={}
+rooms = {}  # e.g. rooms = {"ROOMCODE": {"members": 0, "messages": []}}
 
-def generatecode(length):
-     while True:
-          code=""
-          for _ in range(length):
-               code+=random.choice(ascii_uppercase)
-          if code not in rooms:  
-                 break
+def generate_code(length=4):
+    while True:
+        code = ''.join(random.choice(ascii_uppercase) for _ in range(length))
+        if code not in rooms:
+            return code
 
-     return code             
-     
+@app.route('/api/create_room', methods=['POST'])
+def create_room():
+    room_code = generate_code()
+    rooms[room_code] = {"members": 0, "messages": []}
+    return {"room": room_code}, 201
 
-@app.route("/",methods=["POST","GET"])
-def h():
-      session.clear()
-      if request.method =="POST":
-        name= request.form.get("name")
-        code = request.form.get("code")
-        join= request.form.get("join",False)
-        create = request.form.get("create",False) 
+@app.route('/api/join_room', methods=['POST'])
+def join_room_api():
+    room_code = request.json.get('room')
+    if room_code in rooms:
+        return {"message": "Joined room successfully."}, 200
+    return {"message": "Room not found."}, 404
 
-        if not name:
-            return render_template("h.html",error="enter the name!!!!",code=code,name=name)
+@socketio.on('join_room')
+def handle_join(data):
+    room = data.get('room')
+    name = data.get('name')
+    if not room or not name:
+        return
+    join_room(room)
+    if room not in rooms:
+        rooms[room] = {"members": 0, "messages": []}
+    rooms[room]["members"] += 1
+    # Broadcast join message to other users in room
+    send({"name": name, "message": "has joined the room."}, to=room)
+    socketio.emit('user_joined', {"name": name, "message": f"{name} has joined the room."}, to=room)
+    print(f"{name} joined room {room}")
+@socketio.on('leave_room')
+def handle_leave(data):
+    room = data.get('room')
+    name = data.get('name')
+    if not room or not name:
+        return
+    leave_room(room)
+    if room in rooms:
+        rooms[room]["members"] -= 1
+        if rooms[room]["members"] <= 0:
+            del rooms[room]
+    socketio.emit('user_left', {"name": name, "message": f"{name} has left the room."}, to=room)
+    print(f"{name} left room {room}")
+    
+@socketio.on('message')
 
-        if join != False and not code:
-            return render_template("h.html",error="enter the room code!!!!",code=code,name=name)
 
-        room = code
-        if create != False:
-             room = generatecode(4)
-             rooms[room]={"members":0,"message":[]}
-        elif code not in rooms :
-             return render_template("h.html",error="room not exist",code=code,name=name)
-        session["room"]=room 
-
-        session["name"]=name
-        return redirect(url_for("room"))
-      return render_template("h.html")
-       
-      
-        
-@app.route("/room")
-def room():
-     room = session.get("room")
-     if room is None or session.get("name") is None or room not in rooms:
-          return redirect(url_for(h))
-     return render_template("room.html", code=room)
-@socketio.on("message")
-def message(data):
- room=session.get("room")
- if room not in rooms:
-          return
-                         
-                         
- content= {
-             "name":session.get("name"),
-             "message":data["data"] 
-
-           }
- send(content,to=room)
- rooms[room]["messages"].append(content)
- print(f"{session.get('name')} said:{data['data']}")
-     
-@socketio.on("connect")
-def connect(auth):
-     room = session.get("room")
-     name= session.get("name")
-     if not room or not name:
-          return
-     if room not in rooms:
-          leave_room(room)
-          return 
-     join_room(room)
-     send({"name":name,"message":" has entered the room"}, to= room)
-     rooms[room]["members"]+=1
-     print(f"{name} joined room {room}")
-
-@socketio.on("disconnect")
-def disconnect():
-     room= session.get("room")
-     name=session.get("name")
-     leave_room(room)
-     if room in rooms:
-          rooms[room]["members"]-=1
-          if rooms[room]==0:
-           del rooms[room]
-           
-          send({"name":name,"message":" has left the room"}, to= room)  
-     print(f"{name}has left room {room}")
-
+def handle_message(data):
+    room = data.get('room')
+    if not room or room not in rooms:
+        return
+    msg_content = data.get('data')
+    name = data.get('name', 'Anonymous')
+    message_data = {"name": name, "message": msg_content}
+    rooms[room]["messages"].append(message_data)
+    send(message_data, to=room)
+    print(f"{name} said: {msg_content}")
 if __name__ == "__main__":
-        socketio.run(app,debug=True)
+    socketio.run(app, debug=True)
